@@ -100,7 +100,6 @@ char *find_executable_path(const char *command, const char *path_env)
 
         start = end + 1;
     }
-
     return NULL;
 }
 
@@ -169,7 +168,7 @@ static void execute_command(Command *cmd)
 
     if (pid == 0)
     {
-        //We are now in the CHILD
+        //CHILD
         //execv() replaces this child process with the requested program
         execv(executable_path, cmd->argv);
 
