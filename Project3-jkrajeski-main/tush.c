@@ -136,6 +136,7 @@ static void execute_command(Command *cmd)
     else
     {
         //Component 3
+        //get full path
         const char *path_env = getenv("PATH");
 
         if (path_env == NULL)
@@ -179,7 +180,7 @@ static void execute_command(Command *cmd)
         _exit(1);
     }
 
-    //Wait for the foreground child to finish
+    //Wait for the child to finish
     int status;
 
     if (waitpid(pid, &status, 0) < 0)
