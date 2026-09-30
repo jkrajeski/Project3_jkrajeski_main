@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include "parser.h"
 
@@ -18,34 +20,27 @@ int handle_builtin(Command *cmd);
 //Pass the raw input string to parser.
 //Print a summary of what was parsed — the command name, each argument
 
-char *find_executable_path(const char *command, const char *path_env)
-{
-    if (command == NULL || path_env == NULL)
-    {
+char *find_executable_path(const char *command, const char *path_env) {
+    if (command == NULL || path_env == NULL) {
         return NULL;
     }
 
     const char *start = path_env;
 
-    while (1)
-    {
+    while (1) {
         //Find the end of the current directory in PATH
         const char *end = strchr(start, ':');
 
         size_t dir_length;
 
-        if (end == NULL)
-        {
+        if (end == NULL) {
             dir_length = strlen(start);
-        }
-        else
-        {
-            dir_length = (size_t)(end - start);
+        } else {
+            dir_length = (size_t) (end - start);
         }
 
         //An empty PATH entry means the current directory
-        if (dir_length == 0)
-        {
+        if (dir_length == 0) {
             dir_length = 1;
         }
 
@@ -56,45 +51,36 @@ char *find_executable_path(const char *command, const char *path_env)
 
         size_t candidate_length;
 
-        if (dir_length == 1 && start[0] == ':')
-        {
+        if (dir_length == 1 && start[0] == ':') {
             candidate_length = command_length + 2;
-        }
-        else
-        {
+        } else {
             candidate_length = dir_length + 1 + command_length + 1;
         }
 
         char *candidate = malloc(candidate_length);
 
-        if (candidate == NULL)
-        {
+        if (candidate == NULL) {
             perror("malloc");
             return NULL;
         }
 
         //Handle an empty PATH entry
-        if (start[0] == ':' && dir_length == 1)
-        {
+        if (start[0] == ':' && dir_length == 1) {
             snprintf(candidate, candidate_length, "./%s", command);
-        }
-        else
-        {
+        } else {
             snprintf(candidate, candidate_length, "%.*s/%s",
-                     (int)dir_length, start, command);
+                     (int) dir_length, start, command);
         }
 
         // access checks whether the file exists and can be executed
-        if (access(candidate, X_OK) == 0)
-        {
+        if (access(candidate, X_OK) == 0) {
             return candidate;
         }
 
         free(candidate);
 
         //end of path
-        if (end == NULL)
-        {
+        if (end == NULL) {
             break;
         }
 
@@ -104,52 +90,37 @@ char *find_executable_path(const char *command, const char *path_env)
 }
 
 
-static void execute_command(Command *cmd)
-{
-    if (cmd == NULL || cmd->argc == 0)
-    {
-        return;
-    }
-
-    //no redirection
-    if (cmd->input_file != NULL || cmd->output_file != NULL)
-    {
-        fprintf(stderr, "Redirection is not implemented yet.\n");
+static void execute_command(Command *cmd, int background) {
+    if (cmd == NULL || cmd->argc == 0) {
         return;
     }
 
     char *executable_path = NULL;
 
     //if argv[0] contains /, use it directly
-    if (strchr(cmd->argv[0], '/') != NULL)
-    {
+    if (strchr(cmd->argv[0], '/') != NULL) {
         executable_path = malloc(strlen(cmd->argv[0]) + 1);
 
-        if (executable_path == NULL)
-        {
+        if (executable_path == NULL) {
             perror("malloc");
             return;
         }
 
         strcpy(executable_path, cmd->argv[0]);
-    }
-    else
-    {
+    } else {
         //Component 3
         //get full path
         const char *path_env = getenv("PATH");
 
-        if (path_env == NULL)
-        {
+        if (path_env == NULL) {
             fprintf(stderr, "tush: PATH is not set\n");
             return;
         }
 
         executable_path =
-            find_executable_path(cmd->argv[0], path_env);
+                find_executable_path(cmd->argv[0], path_env);
 
-        if (executable_path == NULL)
-        {
+        if (executable_path == NULL) {
             fprintf(stderr, "tush: %s: command not found\n",
                     cmd->argv[0]);
             return;
@@ -159,17 +130,52 @@ static void execute_command(Command *cmd)
     //Component 2
     pid_t pid = fork();
 
-    if (pid < 0)
-    {
+    if (pid < 0) {
         //fork() failed
         perror("fork");
         free(executable_path);
         return;
     }
 
-    if (pid == 0)
-    {
+    if (pid == 0) {
         //CHILD
+        if (cmd->input_file != NULL) {
+            int fd = open(cmd->input_file, O_RDONLY);
+
+            if (fd < 0) {
+                perror("open");
+                _exit(1);
+            }
+
+            if (dup2(fd, STDIN_FILENO) < 0) {
+                perror("dup2");
+                close(fd);
+                _exit(1);
+            }
+
+            close(fd);
+        }
+
+        if (cmd->output_file != NULL) {
+            int fd = open(
+                cmd->output_file,
+                O_WRONLY | O_CREAT | O_TRUNC,
+                0644
+            );
+
+            if (fd < 0) {
+                perror("open");
+                _exit(1);
+            }
+
+            if (dup2(fd, STDOUT_FILENO) < 0) {
+                perror("dup2");
+                close(fd);
+                _exit(1);
+            }
+
+            close(fd);
+        }
         //execv() replaces this child process with the requested program
         execv(executable_path, cmd->argv);
 
@@ -180,31 +186,56 @@ static void execute_command(Command *cmd)
         _exit(1);
     }
 
-    //Wait for the child to finish
-    int status;
-
-    if (waitpid(pid, &status, 0) < 0)
-    {
-        perror("waitpid");
+    //Wait for the child to finish if its not a background command
+    if (!background) {
+        if (waitpid(pid, NULL, 0) < 0) {
+            perror("waitpid");
+        }
+    } else {
+        printf("%d\n", pid);
     }
 
     free(executable_path);
 }
 
+
+void reap_background_processes(void) {
+    while (1) {
+        pid_t result = waitpid(-1, NULL, WNOHANG);
+
+        if (result > 0) {
+            /* A background child was reaped. */
+            continue;
+        }
+
+        if (result == 0) {
+            //A child exists, but it hasn't finished yet
+            break;
+        }
+
+        if (errno == ECHILD) {
+            //No children exist
+            break;
+        }
+
+        perror("waitpid");
+        break;
+    }
+}
+
 //component 1
-int main(void)
-{
+int main(void) {
     //storage for input
     char line[1024];
 
-    while (1)
-    {
+    while (1) {
+        reap_background_processes();
+
         printf("tush> ");
         fflush(stdout);
 
         //read line and checks for EOF
-        if (fgets(line, sizeof(line), stdin) == NULL)
-        {
+        if (fgets(line, sizeof(line), stdin) == NULL) {
             //EOF, such as Ctrl-D
             printf("\n");
             break;
@@ -214,26 +245,17 @@ int main(void)
         CommandLine *cl = parse_command_line(line);
 
         //NULL means the line was empty or invalid
-        if (cl == NULL)
-        {
+        if (cl == NULL) {
             continue;
         }
 
         //Pipes not implemented yet
-        if (cl->has_pipe)
-        {
+        if (cl->has_pipe) {
             fprintf(stderr, "Pipes are not implemented yet\n");
             free_command_line(cl);
             continue;
         }
 
-        //Background not implemented yet
-        if (cl->background)
-        {
-            fprintf(stderr,"Background not implemented yet\n");
-            free_command_line(cl);
-            continue;
-        }
 
         int builtin_result = handle_builtin(&cl->left);
 
@@ -245,7 +267,7 @@ int main(void)
 
         //executes non-built-in commands
         if (builtin_result == 0) {
-            execute_command(&cl->left);
+            execute_command(&cl->left, cl->background);
         }
         //dynamically allocates so free memory
         free_command_line(cl);
@@ -254,8 +276,7 @@ int main(void)
     return 0;
 }
 
-int handle_builtin(Command *cmd)
-{
+int handle_builtin(Command *cmd) {
     if (cmd->argc == 0) {
         return 0;
     }
