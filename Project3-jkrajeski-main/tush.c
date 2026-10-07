@@ -204,7 +204,7 @@ void reap_background_processes(void) {
         pid_t result = waitpid(-1, NULL, WNOHANG);
 
         if (result > 0) {
-            /* A background child was reaped. */
+            // A background child was reaped
             continue;
         }
 
@@ -220,6 +220,163 @@ void reap_background_processes(void) {
 
         perror("waitpid");
         break;
+    }
+}
+
+//component 5
+static void execute_pipeline(Command *left, Command *right, int background){
+    int pipefd[2];
+
+    //pipefd[0] = read end
+    //pipefd[1] = write end
+    if (pipe(pipefd) < 0) {
+        perror("pipe");
+        return;
+    }
+
+    //Create the LEFT child.
+    pid_t left_pid = fork();
+
+    if (left_pid < 0) {
+        perror("fork");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return;
+    }
+
+    if (left_pid == 0) {
+        //LEFT CHILD
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) {
+            perror("dup2");
+            _exit(1);
+        }
+
+        if (left->input_file != NULL) {
+            int fd = open(left->input_file, O_RDONLY);
+
+            if (fd < 0) {
+                perror("open");
+                _exit(1);
+            }
+
+            if (dup2(fd, STDIN_FILENO) < 0) {
+                perror("dup2");
+                close(fd);
+                _exit(1);
+            }
+
+            close(fd);
+        }
+
+        close(pipefd[0]);
+        close(pipefd[1]);
+
+        //Run the left command
+        char *left_path = NULL;
+
+        // If the command already contains '/', use it directly.
+        if (strchr(left->argv[0], '/') != NULL) {
+            left_path = left->argv[0];
+        } else {
+            left_path = find_executable_path(left->argv[0], getenv("PATH"));
+
+            if (left_path == NULL) {
+                fprintf(stderr, "%s: command not found\n", left->argv[0]);
+                _exit(1);
+            }
+        }
+
+        execv(left_path, left->argv);
+        perror("execv");
+
+        // Only free the path if find_executable_path() allocated it.
+        if (strchr(left->argv[0], '/') == NULL) {
+            free(left_path);
+        }
+
+        _exit(1);
+    }
+
+    //Create the RIGHT child.
+    pid_t right_pid = fork();
+
+    if (right_pid < 0) {
+        perror("fork");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        waitpid(left_pid, NULL, 0);
+        return;
+    }
+
+    if (right_pid == 0) {
+        //RIGHT CHILD
+        if (dup2(pipefd[0], STDIN_FILENO) < 0) {
+            perror("dup2");
+            _exit(1);
+        }
+
+        if (right->output_file != NULL) {
+            int fd = open(right->output_file,
+                          O_WRONLY | O_CREAT | O_TRUNC,
+                          0644);
+
+            if (fd < 0) {
+                perror("open");
+                _exit(1);
+            }
+
+            if (dup2(fd, STDOUT_FILENO) < 0) {
+                perror("dup2");
+                close(fd);
+                _exit(1);
+            }
+
+            close(fd);
+        }
+
+        close(pipefd[0]);
+        close(pipefd[1]);
+
+        //Run the right command
+        char *right_path = NULL;
+
+        // If the command already contains '/', use it directly.
+        if (strchr(right->argv[0], '/') != NULL) {
+            right_path = right->argv[0];
+        } else {
+            right_path = find_executable_path(right->argv[0], getenv("PATH"));
+
+            if (right_path == NULL) {
+                fprintf(stderr, "%s: command not found\n", right->argv[0]);
+                _exit(1);
+            }
+        }
+
+        execv(right_path, right->argv);
+        perror("execv");
+
+        // Only free the path if find_executable_path() allocated it.
+        if (strchr(right->argv[0], '/') == NULL) {
+            free(right_path);
+        }
+
+        _exit(1);
+    }
+
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    //wait if not background
+    if (!background) {
+        if (waitpid(left_pid, NULL, 0) < 0) {
+            perror("waitpid");
+        }
+
+        if (waitpid(right_pid, NULL, 0) < 0) {
+            perror("waitpid");
+        }
+    } else {
+        printf("%d %d\n", left_pid, right_pid);
     }
 }
 
@@ -249,9 +406,8 @@ int main(void) {
             continue;
         }
 
-        //Pipes not implemented yet
         if (cl->has_pipe) {
-            fprintf(stderr, "Pipes are not implemented yet\n");
+            execute_pipeline(&cl->left, &cl->right, cl->background);
             free_command_line(cl);
             continue;
         }
